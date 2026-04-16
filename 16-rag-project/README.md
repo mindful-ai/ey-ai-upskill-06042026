@@ -1,7 +1,7 @@
 
 # Medical RAG Assistant using ChromaDB
 
-Generated: 2026-03-12
+
 
 ## Overview
 
