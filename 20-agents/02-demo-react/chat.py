@@ -84,7 +84,7 @@ Rules:
 
                 if observation:
                     react_messages.append({"role": "user", "content": observation})
-                    # continue
+                    continue
 
                 # ----------------------------
                 # FINAL ANSWER
@@ -98,16 +98,25 @@ Rules:
 
                 #print("[test]", reply.split())
 
-                match = re.search(r"\sFinal Answer\s*:\s*(.*)", reply, re.IGNORECASE)
+                # This should happen outside the loop
 
-                if match:
-                    final_answer = match.group(1).strip()
-                    print("\n[Final Answer Found]", final_answer)
-                    break
+                # match = re.search(r"\sFinal Answer\s*:\s*(.*)", reply, re.IGNORECASE)
+
+                # if match:
+                #     final_answer = match.group(1).strip()
+                #     print("\n[Final Answer Found]", final_answer)
+                #     break
 
             except Exception as e:
                 print(f"Error during LLM call: {e}")
                 break
+        else:
+            match = re.search(r"Final Answer\s*:\s*(.*)", reply, re.IGNORECASE)
+
+            if match:
+                final_answer = match.group(1).strip()
+                print("\n[Final Answer Found]", final_answer)
+                
         # ----------------------------
         # OUTPUT HANDLING
         # ----------------------------

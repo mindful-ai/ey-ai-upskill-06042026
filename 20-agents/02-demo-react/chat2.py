@@ -3,18 +3,7 @@
 from groq import Groq
 from agent_tools import handle_tool_call
 
-# ----------------------------
-# LOAD API KEY
-# ----------------------------
-with open(r"E:\Lenovo Ideapad 330\company-material\ai-upskill\key-vault\groq\groq-api-key.txt", "r") as f:
-    api_key = f.read().strip()
-
-# ----------------------------
-# INIT CLIENT
-# ----------------------------
-client = Groq(api_key=api_key)
-
-MODEL = "llama-3.1-8b-instant"
+# ------ Initialize OpenAI client here ------
 
 
 # ----------------------------
@@ -46,25 +35,11 @@ def chat():
         # ----------------------------
         react_messages = messages.copy()
 
+        # ------ Insert your ReAct prompt here ------
+
         react_messages.append({
             "role": "system",
-            "content": """
-You are a ReAct-style AI assistant.
-
-STRICT FORMAT:
-
-Thought:
-Action:
-Action Input:
-Observation:
-Final Answer:
-
-Rules:
-- Use ONLY tools: [get_time, get_date, get_day, get_weather]
-- For weather → provide city name
-- ALWAYS stop after Final Answer
-- DO NOT repeat actions after observation
-"""
+            "content": """You are a ReAct-style AI assistant."""
         })
 
         final_answer = None

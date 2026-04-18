@@ -20,7 +20,6 @@ def get_day():
     india_tz = pytz.timezone("Asia/Kolkata")
     return datetime.now(india_tz).strftime("%A")
 
-
 def get_weather(city="Bangalore"):
     try:
         geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={city}"
