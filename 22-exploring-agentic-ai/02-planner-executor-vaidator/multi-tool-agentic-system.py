@@ -2,6 +2,7 @@ from langchain_openai import ChatOpenAI
 from langchain.tools import tool
 import sqlite3
 import json
+import re
 
 # ============================================================
 # DATABASE SETUP
@@ -147,13 +148,66 @@ def get_llm(api_key):
 
 def planner(llm, user_input):
     # -------- Logic for planner to generate a plan (action + action inputs) based on user input and available tools
+    print("[INFO] Invoking planner with user input:", user_input)
+    prompt=f"""
+You are a planner that generates a plan to achieve a user's request using available tools.
+
+Available tools:
+- add_user(name, user_id): Add a new user to the database
+- list_users(): List all users in the database   
+- get_user_by_id(user_id): Retrieve a user by their ID
+- update_user_auth(user_id, authenticated): Update authentication status of a user (0 or 1)
+- delete_user(user_id): Delete a user from the database 
+- count_users(): Return total number of users in the database
+- search_user_by_name(name): Search users by name (partial match supported)
+
+User request: {user_input}
+
+Return ONLY JSON:
+{{
+    "action": "tool_name",
+    "args": {{...}}
+}}
+    """
     response = llm.invoke(prompt)
-    return json.loads(response.content)
+    # Safely extract text from the LLM response
+    raw = None
+    if hasattr(response, "content"):
+        raw = response.content
+    elif isinstance(response, str):
+        raw = response
+    else:
+        raw = str(response)
+
+    raw = (raw or "").strip()
+    print("[INFO] Planner raw response:", raw)
+
+    if not raw:
+        raise ValueError("Planner returned empty response; cannot parse JSON plan.")
+
+    # Try parsing direct JSON, otherwise attempt to recover a JSON object embedded in text
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        m = re.search(r"(\{.*\})", raw, re.DOTALL)
+        if m:
+            candidate = m.group(1)
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass
+
+    raise ValueError(
+        "Planner returned non-JSON response. Raw response:\n"
+        f"{raw}\n\n"
+        "Consider adjusting the prompt to return strict JSON or inspect the LLM output above."
+    )
 
 # ============================================================
 # EXECUTOR
 # ============================================================
 
+# Tool Registry
 TOOLS = {
     "add_user": add_user,
     "list_users": list_users,
@@ -166,8 +220,30 @@ TOOLS = {
 
 def executor(plan):
     # -------- Logic for executor
+    print("[INFO] Executing plan:", plan)
+    action = plan.get("action")
+    args = plan.get("args", {})
+    if action not in TOOLS:
+        return f"ERROR: Unknown action '{action}'"
 
-    return "ERROR: Unknown action"
+    tool_fn = TOOLS[action]
+
+    # If the tool is a LangChain Tool wrapper it may expose `.invoke` or `.run`.
+    # Prefer calling the function directly with kwargs/args when possible.
+    try:
+        if isinstance(args, dict):
+            # If the tool is a wrapper object with `invoke`, call the underlying callable if available
+            if hasattr(tool_fn, "invoke") and not callable(tool_fn):
+                return tool_fn.invoke(args)
+            return tool_fn(**args)
+        elif args is None:
+            return tool_fn()
+        else:
+            if isinstance(args, (list, tuple)):
+                return tool_fn(*args)
+            return tool_fn(args)
+    except TypeError as e:
+        return f"ERROR: tool call failed: {e}"
 
 # ============================================================
 # VALIDATOR
@@ -175,6 +251,15 @@ def executor(plan):
 
 def validator(llm, user_input, result):
     # ------- Logic for valdator
+    print("[INFO] Validating result:", result)
+    prompt = f"""
+You are a validator that checks if the result of an action correctly fulfills the user's request.
+
+User request: {user_input}
+Result: {result}
+
+Answer with "VALID" if the result fulfills the request, otherwise answer with "INVALID".
+    """
     return llm.invoke(prompt).content.strip()
 
 # ============================================================
@@ -185,10 +270,17 @@ def run_agent(llm, user_input, retries=2):
 
     for _ in range(retries):
         # ---------- Demo: Logic for orchestrating the planner, executor and validator
+        print(f"\n[ORCHESTRATOR] Attempt {_+1} for user input: {user_input}")
+        plan = planner(llm, user_input)
+        print("[ORCHESTRATOR] Generated plan:", plan)
+        result = executor(plan)
+        print("[ORCHESTRATOR] Execution result:", result)
+        status = validator(llm, user_input, result)
+        print(f"[ORCHESTRATOR] Status: {status}")
         if status == "VALID":
             return result
-
-    return "FAILED"
+        else:
+            return "FAILED"
 
 # ============================================================
 # MAIN

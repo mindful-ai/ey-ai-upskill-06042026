@@ -43,9 +43,10 @@ def seed_data():
 # TOOLS (STRUCTURED)
 # ============================================================
 
-@tool
+@tool("add_user", description="Use this tool to add a user to the database. Provide name and id as input.")
 def add_user(name: str, user_id: str) -> str:
     """Add a user to the database"""
+    # print(f"Adding user with name={name} and id={user_id}")
     conn = sqlite3.connect("users.db")
     cursor = conn.cursor()
 
@@ -55,16 +56,16 @@ def add_user(name: str, user_id: str) -> str:
             (user_id, name, 1)
         )
         conn.commit()
+        conn.close()
         return f"User {name} added with ID {user_id}"
     except Exception as e:
-        return f"Error: {str(e)}"
-    finally:
         conn.close()
-
-
+        return f"Error: {str(e)}"
+        
 @tool
 def list_users() -> str:
     """List all users"""
+    # print("[Tool] Listing all users...")
     conn = sqlite3.connect("users.db")
     cursor = conn.cursor()
 
@@ -72,7 +73,9 @@ def list_users() -> str:
     rows = cursor.fetchall()
     conn.close()
 
-    return "\n".join([str(r) for r in rows]) or "No users found"
+    response = "\n".join([str(r) for r in rows]) or "No users found"
+    # print("[Tool] List of users:\n", response)
+    return response
 
 
 # ============================================================
@@ -100,18 +103,65 @@ if __name__ == "__main__":
 
     # ---------------- Demo: change prompt to show how system prompt can be used to steer agent behavior ----------------
 
-    # THIS is the correct API  
+    prompt = """
+You are a database user management assistant.
+- Always use tools for any user management task.
+- For adding users, use the add_user tool with name and id.
+- For listing users, use the list_users tool.
+- Never directly answer user management questions without using tools.
+- IMPORTANT: Return the tool output EXACTLY as it is without any modifications or explanations.
+- STRICT: 
+    - Call only one tool per user query.
+    - After calling a tool, return the tool output as the final answer without retrying or calling another tool, even if the output is an error.
+"""
+
+    prompt2 = """
+You are a database user management assistant.
+
+Your job is to execute exactly ONE tool per user request.
+
+Available tools:
+- add_user(name, user_id)
+- list_users()
+
+Rules:
+- Decide the correct tool based on the user request.
+- Call exactly ONE tool.
+- After the tool returns output, STOP immediately.
+- Do NOT call another tool.
+- Do NOT retry.
+- Do NOT continue reasoning.
+
+CRITICAL:
+- The tool output is the FINAL answer.
+- Return the tool output EXACTLY as it is. 
+- Do not summarize, modify or explain the tool output.
+- Even if the tool returns an error, DO NOT retry.
+
+Examples:
+
+User: Add user Ravi with id ML100  
+→ call add_user(name="Ravi", user_id="ML100")
+
+User: List all users  
+→ call list_users()
+OUTPUT FORMAT:
+-> ID: ML001, Name: Raj, Authenticated: 1
+-> ID: ML002, Name: Ram, Authenticated: 0
+-> ID: ML003, Name: Sham, Authenticated: 1
+"""
+
     agent = create_agent(
-        model=llm,
-        tools=tools,
-        system_prompt="You are a user management assistant. Always use tools."  # [Demo]
-        system_prompt=prompt
-    )
+            model=llm,
+            tools=tools,
+            system_prompt=prompt2,
+            # debug=True,
+        )
 
     # Invoke
     response = agent.invoke({
         "messages": [
-            {"role": "user", "content": "Add a user named Purushotham with id ML501"}
+            {"role": "user", "content": "Add a user named Sunil with id ML508"}
         ]
     })
 
@@ -119,8 +169,11 @@ if __name__ == "__main__":
 
     response = agent.invoke({
         "messages": [
-            {"role": "user", "content": "Give me a list of all authenticated users"}
+            {"role": "user", "content": "Give me a list of all users"}
         ]
     })
 
     print(response["messages"][-1].content)
+
+
+    

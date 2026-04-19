@@ -15,10 +15,8 @@ class AgentState(TypedDict):
     plan: dict
     result: str
     status: str
-    retries: int
-    parallel_results: dict
+    suggestion: str
 
-MAX_RETRIES = 2
 
 # ============================================================
 # DATABASE
@@ -27,6 +25,7 @@ MAX_RETRIES = 2
 def setup_db():
     conn = sqlite3.connect("users.db")
     cursor = conn.cursor()
+
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
@@ -34,6 +33,7 @@ def setup_db():
         authenticated INTEGER
     )
     """)
+
     conn.commit()
     conn.close()
 
@@ -41,32 +41,44 @@ def setup_db():
 def seed_data():
     conn = sqlite3.connect("users.db")
     cursor = conn.cursor()
+
     users = [
         ("ML001", "Raj", 1),
         ("ML002", "Ram", 0),
         ("ML003", "Sham", 1)
     ]
+
     cursor.executemany("INSERT OR IGNORE INTO users VALUES (?, ?, ?)", users)
     conn.commit()
     conn.close()
 
+
 # ============================================================
-# TOOLS
+# TOOLS (SAFE)
 # ============================================================
 
 @tool
 def add_user(name: str, user_id: str) -> str:
-    """Add a new user"""
+    """Add user safely (no duplicates)"""
+
     conn = sqlite3.connect("users.db")
     cursor = conn.cursor()
-    try:
-        cursor.execute("INSERT INTO users VALUES (?, ?, ?)", (user_id, name, 1))
-        conn.commit()
-        return f"SUCCESS: Added {name}"
-    except Exception as e:
-        return f"ERROR: {str(e)}"
-    finally:
+
+    cursor.execute("SELECT * FROM users WHERE id=?", (user_id,))
+    existing = cursor.fetchone()
+
+    if existing:
         conn.close()
+        return f"ERROR: User with ID {user_id} already exists"
+
+    cursor.execute(
+        "INSERT INTO users VALUES (?, ?, ?)",
+        (user_id, name, 1)
+    )
+    conn.commit()
+    conn.close()
+
+    return f"SUCCESS: Added {name}"
 
 
 @tool
@@ -81,32 +93,26 @@ def list_users() -> str:
 
 
 @tool
-def count_users() -> str:
-    """Count users"""
+def get_user_by_id(user_id: str) -> str:
+    """Fetch user by ID"""
     conn = sqlite3.connect("users.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM users")
-    count = cursor.fetchone()[0]
+    cursor.execute("SELECT * FROM users WHERE id=?", (user_id,))
+    row = cursor.fetchone()
     conn.close()
-    return str(count)
 
+    if not row:
+        return f"ERROR: User {user_id} not found"
 
-@tool
-def search_user_by_name(name: str) -> str:
-    """Search users by name"""
-    conn = sqlite3.connect("users.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE name LIKE ?", (f"%{name}%",))
-    rows = cursor.fetchall()
-    conn.close()
-    return json.dumps(rows)
+    return json.dumps(row)
+
 
 TOOLS = {
     "add_user": add_user,
     "list_users": list_users,
-    "count_users": count_users,
-    "search_user_by_name": search_user_by_name,
+    "get_user_by_id": get_user_by_id,
 }
+
 
 # ============================================================
 # LLM
@@ -119,6 +125,7 @@ def get_llm(api_key):
         openai_api_base="https://api.groq.com/openai/v1",
         temperature=0
     )
+
 
 # ============================================================
 # UTIL
@@ -135,21 +142,28 @@ def safe_parse_json(text):
         except:
             return None
 
+
 # ============================================================
 # NODES
 # ============================================================
-
+# -- Changes made in prompt with exampples
 def create_planner_node(llm):
     def planner_node(state: AgentState):
 
         prompt = f"""
 You are a planner.
 
-If user asks for analytics, return:
-{{"mode": "parallel"}}
+Available actions:
+- add_user(name, user_id)
+- list_users()
+- get_user_by_id(user_id)
 
-Otherwise:
-{{"mode": "single", "action": "...", "args": {{}}}}
+Examples:
+"Add user Alice ML200" → add_user(name="Alice", user_id="ML200")
+"Find user ML001" → get_user_by_id(user_id="ML001")
+
+Return ONLY JSON:
+{{"action": "...", "args": {{...}}}}
 
 User input: {state['input']}
 """
@@ -158,56 +172,47 @@ User input: {state['input']}
         plan = safe_parse_json(response.content)
 
         if not plan:
-            plan = {"mode": "single", "action": "list_users", "args": {}}
+            plan = {"action": "list_users", "args": {}}
 
         return {"plan": plan}
 
     return planner_node
 
 
-# -------- Single execution --------
-def executor_single(state: AgentState):
-    plan = state["plan"]
-    action = plan.get("action")
-    args = plan.get("args", {})
+def executor_node(state: AgentState):
+    action = state["plan"].get("action")
+    args = state["plan"].get("args", {})
 
     if action in TOOLS:
         result = TOOLS[action].invoke(args)
     else:
         result = "ERROR: Unknown action"
 
+    # ----------------------- detect errors ------------------------
+    if "ERROR" in result:
+        return {
+            "result": result,
+            "status": "ERROR"
+        }
+
     return {"result": result}
 
 
-# -------- Parallel execution (SAFE) --------
-def executor_parallel(state: AgentState):
-
-    results = {
-        "count": count_users.invoke({}),
-        "list": list_users.invoke({}),
-        "search": search_user_by_name.invoke({"name": "a"})
-    }
-
-    return {"parallel_results": results}
-
-
-# -------- Aggregator --------
-def aggregator_node(state: AgentState):
-    combined = json.dumps(state.get("parallel_results", {}), indent=2)
-    return {"result": combined}
-
-
-# -------- Validator --------
 def create_validator_node(llm):
     def validator_node(state: AgentState):
 
+        # ---------------- short-circuit errors ----------------
+        if state.get("status") == "ERROR":
+            return {"status": "ERROR"}
+
         prompt = f"""
-Check if result satisfies request.
+Validate result.
 
 User: {state['input']}
 Result: {state['result']}
 
-Answer ONLY: VALID or INVALID
+Answer ONLY:
+VALID or INVALID
 """
 
         response = llm.invoke(prompt)
@@ -221,54 +226,66 @@ Answer ONLY: VALID or INVALID
     return validator_node
 
 
-def retry_node(state):
-    return {"retries": state["retries"] + 1}
+def create_suggester_node(llm):
+    def suggester_node(state: AgentState):
+
+        prompt = f"""
+User request failed.
+
+Request: {state['input']}
+Error: {state['result']}
+
+Suggest a helpful fix (short).
+
+Example:
+- Try a different user ID
+"""
+
+        response = llm.invoke(prompt)
+
+        return {"suggestion": response.content}
+
+    return suggester_node
 
 
 # ============================================================
-# ROUTERS
+# ROUTER
 # ============================================================
 
-def route_after_planner(state: AgentState):
-    if state["plan"].get("mode") == "parallel":
-        return "executor_parallel"
-    return "executor_single"
+def route(state: AgentState):
 
-
-def route_after_validator(state: AgentState):
     if state["status"] == "VALID":
         return END
-    if state["retries"] >= MAX_RETRIES:
-        return END
-    return "retry"
+
+    # --------------- Suggestion step for errors ----------------
+    if state["status"] == "ERROR":
+        return "suggester"
+
+    return END
 
 
 # ============================================================
-# DEMOGRAPH
+# GRAPH
 # ============================================================
 
 def build_graph(llm):
-    
+
     graph = StateGraph(AgentState)
 
     graph.add_node("planner", create_planner_node(llm))
-    graph.add_node("executor_single", executor_single)
-    graph.add_node("executor_parallel", executor_parallel)
-    graph.add_node("aggregator", aggregator_node)
+    graph.add_node("executor", executor_node)
     graph.add_node("validator", create_validator_node(llm))
-    graph.add_node("retry", retry_node)
+    graph.add_node("suggester", create_suggester_node(llm))
 
     graph.set_entry_point("planner")
-    graph.add_conditional_edges("planner", route_after_planner)
 
-    graph.add_edge("executor_single", "validator")
-    graph.add_edge("executor_parallel", "aggregator")
-    graph.add_edge("aggregator", "validator")
+    graph.add_edge("planner", "executor")
+    graph.add_edge("executor", "validator")
 
-    graph.add_conditional_edges("validator", route_after_validator)
-    graph.add_edge("retry", "planner")
+    graph.add_conditional_edges("validator", route)
 
     return graph.compile()
+
 
 # ============================================================
 # MAIN
@@ -286,9 +303,10 @@ if __name__ == "__main__":
     app = build_graph(llm)
 
     queries = [
-        "Add user Alice with id ML300",
-        "List all users",
-        "Show analytics of users"
+        "Add user Anil with id ML200",
+        "Add user Anil with id ML200",  # duplicate
+        "Find user ML001",
+        "List all users"
     ]
 
     for q in queries:
@@ -300,11 +318,12 @@ if __name__ == "__main__":
             "plan": {},
             "result": "",
             "status": "",
-            "retries": 0,
-            "parallel_results": {}
+            "suggestion": ""
         }
 
         result = app.invoke(state)
 
-        print("FINAL RESULT:")
-        print(result["result"])
+        print("RESULT:", result.get("result"))
+
+        if result.get("suggestion"):
+            print("💡 SUGGESTION:", result["suggestion"])

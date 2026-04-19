@@ -275,7 +275,23 @@ def route(state: AgentState):
 # ============================================================
 
 def build_graph(llm):
-    pass
+    
+    graph = StateGraph(AgentState)
+
+    graph.add_node("planner", create_planner_node(llm))
+    graph.add_node("executor", executor_node)
+    graph.add_node("validator", create_validator_node(llm))
+    graph.add_node("retry", retry_node)
+
+    graph.add_edge("planner", "executor")
+    graph.add_edge("executor", "validator")
+
+    graph.add_conditional_edges("validator", route)
+    graph.add_edge("retry", "planner")
+
+    graph.set_entry_point("planner")
+
+    return graph.compile()
 
 # ============================================================
 # MAIN
@@ -295,7 +311,7 @@ if __name__ == "__main__":
     queries = [
         "Add user Alice with id ML200",
         "List all users",
-        "Find user ML001", # Discuss here
+        "Find user with id ML001", # Discuss here
         "Update ML002 authentication to 1",
         "Count users",
         "Search users named Raj",

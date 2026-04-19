@@ -1,3 +1,17 @@
+'''
+Demonstration of building a LangGraph agent that interacts with a SQLite database 
+using multiple tools.
+
+✅ LangGraph workflow
+✅ Multi-tool orchestration
+✅ Retry + validation loop
+✅ Dependency injection (correct design)
+✅ Deterministic execution
+
+- Purushotham
+
+'''
+
 from langchain_openai import ChatOpenAI
 from langchain.tools import tool
 from langgraph.graph import StateGraph, END
@@ -7,7 +21,7 @@ import json
 from typing import TypedDict
 
 # ============================================================
-# STATE
+# STATE (DATA ONLY — NO LLM HERE)
 # ============================================================
 
 class AgentState(TypedDict):
@@ -15,18 +29,15 @@ class AgentState(TypedDict):
     plan: dict
     result: str
     status: str
-    retries: int
-    parallel_results: dict
-
-MAX_RETRIES = 2
 
 # ============================================================
-# DATABASE
+# DATABASE SETUP
 # ============================================================
 
 def setup_db():
     conn = sqlite3.connect("users.db")
     cursor = conn.cursor()
+
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
@@ -34,6 +45,7 @@ def setup_db():
         authenticated INTEGER
     )
     """)
+
     conn.commit()
     conn.close()
 
@@ -41,22 +53,25 @@ def setup_db():
 def seed_data():
     conn = sqlite3.connect("users.db")
     cursor = conn.cursor()
+
     users = [
         ("ML001", "Raj", 1),
         ("ML002", "Ram", 0),
         ("ML003", "Sham", 1)
     ]
+
     cursor.executemany("INSERT OR IGNORE INTO users VALUES (?, ?, ?)", users)
+
     conn.commit()
     conn.close()
 
 # ============================================================
-# TOOLS
+# TOOLS (ALL STRUCTURED + DOCSTRINGS)
 # ============================================================
 
 @tool
 def add_user(name: str, user_id: str) -> str:
-    """Add a new user"""
+    """Add a new user to the database"""
     conn = sqlite3.connect("users.db")
     cursor = conn.cursor()
     try:
@@ -71,7 +86,7 @@ def add_user(name: str, user_id: str) -> str:
 
 @tool
 def list_users() -> str:
-    """List all users"""
+    """Return all users"""
     conn = sqlite3.connect("users.db")
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM users")
@@ -81,8 +96,44 @@ def list_users() -> str:
 
 
 @tool
+def get_user_by_id(user_id: str) -> str:
+    """Fetch a user by ID"""
+    conn = sqlite3.connect("users.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE id=?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return json.dumps(row)
+
+
+@tool
+def update_user_auth(user_id: str, authenticated: int) -> str:
+    """Update authentication status (0 or 1)"""
+    conn = sqlite3.connect("users.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE users SET authenticated=? WHERE id=?",
+        (authenticated, user_id)
+    )
+    conn.commit()
+    conn.close()
+    return "SUCCESS: Updated"
+
+
+@tool
+def delete_user(user_id: str) -> str:
+    """Delete a user"""
+    conn = sqlite3.connect("users.db")
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM users WHERE id=?", (user_id,))
+    conn.commit()
+    conn.close()
+    return "SUCCESS: Deleted"
+
+
+@tool
 def count_users() -> str:
-    """Count users"""
+    """Count total users"""
     conn = sqlite3.connect("users.db")
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM users")
@@ -93,7 +144,7 @@ def count_users() -> str:
 
 @tool
 def search_user_by_name(name: str) -> str:
-    """Search users by name"""
+    """Search users by partial name"""
     conn = sqlite3.connect("users.db")
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM users WHERE name LIKE ?", (f"%{name}%",))
@@ -101,9 +152,13 @@ def search_user_by_name(name: str) -> str:
     conn.close()
     return json.dumps(rows)
 
+# TOOL REGISTRY
 TOOLS = {
     "add_user": add_user,
     "list_users": list_users,
+    "get_user_by_id": get_user_by_id,
+    "update_user_auth": update_user_auth,
+    "delete_user": delete_user,
     "count_users": count_users,
     "search_user_by_name": search_user_by_name,
 }
@@ -121,52 +176,44 @@ def get_llm(api_key):
     )
 
 # ============================================================
-# UTIL
-# ============================================================
-
-def safe_parse_json(text):
-    try:
-        return json.loads(text)
-    except:
-        try:
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            return json.loads(text[start:end])
-        except:
-            return None
-
-# ============================================================
-# NODES
+# NODES (WITH LLM INJECTION)
 # ============================================================
 
 def create_planner_node(llm):
     def planner_node(state: AgentState):
-
         prompt = f"""
 You are a planner.
 
-If user asks for analytics, return:
-{{"mode": "parallel"}}
+Available actions:
+- add_user(name, user_id)
+- list_users()
+- get_user_by_id(user_id)
+- update_user_auth(user_id, authenticated)
+- delete_user(user_id)
+- count_users()
+- search_user_by_name(name)
 
-Otherwise:
-{{"mode": "single", "action": "...", "args": {{}}}}
+Return ONLY JSON:
+{{
+  "action": "...",
+  "args": {{...}}
+}}
 
 User input: {state['input']}
 """
-
         response = llm.invoke(prompt)
-        plan = safe_parse_json(response.content)
 
-        if not plan:
-            plan = {"mode": "single", "action": "list_users", "args": {}}
+        try:
+            plan = json.loads(response.content)
+        except:
+            plan = {"action": "list_users", "args": {}}
 
-        return {"plan": plan}
+        return {**state, "plan": plan}
 
     return planner_node
 
 
-# -------- Single execution --------
-def executor_single(state: AgentState):
+def executor_node(state: AgentState):
     plan = state["plan"]
     action = plan.get("action")
     args = plan.get("args", {})
@@ -176,97 +223,51 @@ def executor_single(state: AgentState):
     else:
         result = "ERROR: Unknown action"
 
-    return {"result": result}
+    return {**state, "result": result}
 
 
-# -------- Parallel execution (SAFE) --------
-def executor_parallel(state: AgentState):
-
-    results = {
-        "count": count_users.invoke({}),
-        "list": list_users.invoke({}),
-        "search": search_user_by_name.invoke({"name": "a"})
-    }
-
-    return {"parallel_results": results}
-
-
-# -------- Aggregator --------
-def aggregator_node(state: AgentState):
-    combined = json.dumps(state.get("parallel_results", {}), indent=2)
-    return {"result": combined}
-
-
-# -------- Validator --------
 def create_validator_node(llm):
     def validator_node(state: AgentState):
-
         prompt = f"""
-Check if result satisfies request.
+Validate result.
 
-User: {state['input']}
+User request: {state['input']}
 Result: {state['result']}
 
-Answer ONLY: VALID or INVALID
+Answer ONLY:
+VALID or INVALID
 """
-
         response = llm.invoke(prompt)
-        status = response.content.strip()
-
-        if status not in ["VALID", "INVALID"]:
-            status = "VALID"
-
-        return {"status": status}
+        return {**state, "status": response.content.strip()}
 
     return validator_node
 
-
-def retry_node(state):
-    return {"retries": state["retries"] + 1}
-
-
 # ============================================================
-# ROUTERS
+# ROUTER
 # ============================================================
 
-def route_after_planner(state: AgentState):
-    if state["plan"].get("mode") == "parallel":
-        return "executor_parallel"
-    return "executor_single"
-
-
-def route_after_validator(state: AgentState):
+def route(state: AgentState):
     if state["status"] == "VALID":
         return END
-    if state["retries"] >= MAX_RETRIES:
-        return END
-    return "retry"
-
+    return "planner"
 
 # ============================================================
-# DEMOGRAPH
+# GRAPH BUILDER
 # ============================================================
 
 def build_graph(llm):
-    
     graph = StateGraph(AgentState)
 
     graph.add_node("planner", create_planner_node(llm))
-    graph.add_node("executor_single", executor_single)
-    graph.add_node("executor_parallel", executor_parallel)
-    graph.add_node("aggregator", aggregator_node)
+    graph.add_node("executor", executor_node)
     graph.add_node("validator", create_validator_node(llm))
-    graph.add_node("retry", retry_node)
 
     graph.set_entry_point("planner")
-    graph.add_conditional_edges("planner", route_after_planner)
 
-    graph.add_edge("executor_single", "validator")
-    graph.add_edge("executor_parallel", "aggregator")
-    graph.add_edge("aggregator", "validator")
+    graph.add_edge("planner", "executor")
+    graph.add_edge("executor", "validator")
 
-    graph.add_conditional_edges("validator", route_after_validator)
-    graph.add_edge("retry", "planner")
+    graph.add_conditional_edges("validator", route)
 
     return graph.compile()
 
@@ -283,28 +284,32 @@ if __name__ == "__main__":
         api_key = f.read().strip()
 
     llm = get_llm(api_key)
+
     app = build_graph(llm)
 
-    queries = [
-        "Add user Alice with id ML300",
+    # TEST CASES
+    inputs = [
+        "Add user Alice with id ML200",
         "List all users",
-        "Show analytics of users"
+        "Find user ML001",
+        "Update ML002 authentication to 1",
+        "Count users",
+        "Search users named Raj",
+        "Delete user ML003"
     ]
 
-    for q in queries:
-        print("\n======================")
-        print("USER:", q)
+    for query in inputs:
+        print("\n============================")
+        print("USER:", query)
 
         state = {
-            "input": q,
+            "input": query,
             "plan": {},
             "result": "",
-            "status": "",
-            "retries": 0,
-            "parallel_results": {}
+            "status": ""
         }
 
         result = app.invoke(state)
 
-        print("FINAL RESULT:")
-        print(result["result"])
+        print("FINAL RESULT:", result["result"])
+
