@@ -7,14 +7,21 @@ import requests
 import json
 
 app = FastAPI()
-client = OpenAI(api_key="YOUR_OPENAI_API_KEY")
+
+f = open(r"E:\Lenovo Ideapad 330\company-material\ai-upskill\key-vault\openai\ne-openai-api-key.txt")
+apikey = f.read()
+f.close()
+
+client = OpenAI(api_key=apikey)
+
+weather_api_key = "87772df6c012e938a4ec01e30f429d59"
 
 # -----------------------------
 # TOOL IMPLEMENTATION
 # -----------------------------
 def get_weather(city: str):
     api_key = "YOUR_OPENWEATHER_API_KEY"
-    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric"
+    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={weather_api_key}&units=metric"
 
     response = requests.get(url)
     data = response.json()

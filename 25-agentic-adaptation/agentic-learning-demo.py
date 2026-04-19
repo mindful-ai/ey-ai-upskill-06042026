@@ -1,7 +1,11 @@
 import random
 from openai import OpenAI
 
-client = OpenAI()
+f = open(r"E:\Lenovo Ideapad 330\company-material\ai-upskill\key-vault\openai\ne-openai-api-key.txt")
+apikey = f.read()
+f.close()
+
+client = OpenAI(api_key=apikey)
 
 # -----------------------------
 # MEMORY (learned preference)
