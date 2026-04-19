@@ -7,8 +7,8 @@ aboc-advanced/
 ├── app.py
 │
 ├── config/
-│   ├── settings.py          # 🔥 Groq LLM config
-│   ├── prompts.py           # 🔥 upgraded prompts
+│   ├── settings.py          # Groq LLM config
+│   ├── prompts.py           # upgraded prompts
 │   └── constants.py
 │
 ├── graph/
